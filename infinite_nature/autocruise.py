@@ -27,6 +27,8 @@ import imageio
 import infinite_nature_lib
 import numpy as np
 import tensorflow as tf
+import tensorflow_hub as hub
+
 
 
 tf.compat.v1.flags.DEFINE_string(
@@ -107,6 +109,39 @@ def generate_autocruise(np_input_rgbd, checkpoint,
       print("time / step: %04f" % ((time.time() - t0) / (i + 1)))
       print()
 
+def load_image(image_path):
+  # Data converted from JS ends up as a string, needs to be converted to
+  # bytes using Latin-1 encoding (which just maps 0-255 to 0-255).
+  with open(image_path, "rb") as image:
+    data = image.read()
+  # data = data.encode('Latin-1')
+  rgb = tf.image.decode_image(data, channels=3, dtype=tf.float32)
+  resized = tf.image.resize(rgb, [160, 256], tf.image.ResizeMethod.AREA)
+  rgbd = tf.concat([resized, midas_disparity(resized)], axis=-1)
+  return rgbd
+
+midas_model = hub.load('https://tfhub.dev/intel/midas/v2/2', tags=['serve'])
+
+def midas_disparity(rgb):
+  """Computes MiDaS v2 disparity on an RGB input image.
+
+  Args:
+    rgb: [H, W, 3] Range [0.0, 1.0].
+  Returns:
+    [H, W, 1] MiDaS disparity resized to the input size and in the range
+    [0.0, 1.0]
+  """
+  size = rgb.shape[:2]
+  resized = tf.image.resize(rgb, [384, 384], tf.image.ResizeMethod.BICUBIC)
+  # MiDaS networks wants [1, C, H, W]
+  midas_input = tf.transpose(resized, [2, 0, 1])[tf.newaxis]
+  prediction = midas_model.signatures['serving_default'](midas_input)['default'][0]
+  disp_min = tf.reduce_min(prediction)
+  disp_max = tf.reduce_max(prediction)
+  prediction = (prediction - disp_min) / (disp_max - disp_min)
+  return tf.image.resize(
+      prediction[..., tf.newaxis], size,  method=tf.image.ResizeMethod.AREA)
+
 
 def main(unused_arg):
   if len(unused_arg) > 1:
@@ -114,7 +149,8 @@ def main(unused_arg):
         "Too many command-line arguments.")
   config.set_training(False)
   model_path = "ckpt/model.ckpt-6935893"
-  input_pkl = pickle.load(open("autocruise_input1.pkl", "rb"))
+  input_pkl = load_image("ethan.jpg")["input_rgbd"]
+  # input_pkl = pickle.load(open("autocruise_input1.pkl", "rb"))
   generate_autocruise(input_pkl["input_rgbd"],
                       model_path,
                       FLAGS.output_folder,
